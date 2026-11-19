@@ -2,145 +2,147 @@
 
 [![CI](https://github.com/toutouer/ghost-storage-r2/actions/workflows/ci.yml/badge.svg)](https://github.com/toutouer/ghost-storage-r2/actions/workflows/ci.yml)
 
-Cloudflare R2 & S3-compatible storage adapter for **Ghost 5.x & 6.x** (Node.js >= 20).
+A lightweight, production-hardened **Cloudflare R2 & S3-compatible storage adapter** for **Ghost 5.x & 6.x** (Node.js ≥ 20).
 
-This project originally evolved from [laosb/ghos3](https://github.com/laosb/ghos3) (which modernized [colinmeinke/ghost-storage-adapter-s3](https://github.com/colinmeinke/ghost-storage-adapter-s3)) and is now maintained as an independent repository tailored for Cloudflare R2 and Docker / Portainer deployments.
-
-## Features
-
-- Built on AWS SDK v3 (`@aws-sdk/client-s3`) with Cloudflare R2 flexible checksum compatibility (`requestChecksumCalculation` / `responseChecksumValidation: 'WHEN_REQUIRED'`).
-- Two serving modes via `serveMode`:
-  - `direct` (default): Streams objects through Ghost with native `HEAD` (`HeadObjectCommand`), HTTP `Range` (`206 Partial Content` / `416 Range Not Satisfiable`) support for audio/video seeking and download resumption, and clean stream teardown on client disconnect.
-  - `redirect`: Returns `301` redirects directly to `${assetHost}/${key}`.
-- Accurate `Content-Type` inference (recovering proper MIME types even for legacy `application/octet-stream` objects), RFC 9111 `no-transform` on binary assets (preserving `Content-Length` and preventing Express/proxy re-compression), `Last-Modified` / `ETag` propagation, and path traversal protection.
-- Proper `ENOENT` / `404` handling for Ghost internal `read()` and `exists()` checks, plus safe `delete()` handling for historical `YYYY/MM` paths.
+Designed to mirror Ghost's native local storage layout (`images`, `media`, `files`) 1:1 in object storage—so **Ghost's built-in responsive images, WebP/AVIF variants, video thumbnails, and large file downloads** work seamlessly without hacks.
 
 ---
 
-## Configuration
+## Why `ghost-storage-r2`?
 
-### Options
+Most Ghost S3 adapters either flatten paths into a single directory, break Ghost's local responsive image pipeline, lose video thumbnails, or trigger subtle HTTP streaming bugs on Ghost 6 + Cloudflare R2. This adapter solves all of them cleanly:
 
-| Option | Required | Default | Description |
-| --- | --- | --- | --- |
-| `bucket` | Yes | — | R2 / S3 bucket name. |
-| `accessKeyId` | No | AWS credential chain | R2 S3 API Access Key ID. |
-| `secretAccessKey` | No | AWS credential chain | R2 S3 API Secret Access Key. |
-| `region` | No | `'auto'` | Region slug (Cloudflare R2 uses `'auto'`). |
-| `endpoint` | No | — | R2 S3 endpoint, e.g. `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`. |
-| `forcePathStyle` | No | `Boolean(endpoint)` | Use path-style S3 URLs (`true` by default when `endpoint` is set). |
-| `assetHost` | No | S3 URL | Public CDN / R2 custom domain URL (e.g. `https://cdn.example.com`). |
-| `pathPrefix` | No | `''` | Optional subdirectory prefix inside the bucket. |
-| `serveMode` | No | `'direct'` | `'direct'` (proxy stream with `Range`) or `'redirect'` (`301` to `assetHost`). |
-
-> Note: Traditional S3 `acl` is intentionally not used, as Cloudflare R2 manages public access at the bucket/custom-domain level.
-
-### `config.production.json` example
-
-If you install the adapter under `r2` (e.g. `adapters/storage/r2/index.js`):
-
-```json
-{
-  "storage": {
-    "active": "r2",
-    "images": {
-      "adapter": "r2"
-    },
-    "media": {
-      "adapter": "r2"
-    },
-    "files": {
-      "adapter": "r2"
-    },
-    "r2": {
-      "bucket": "your-r2-bucket",
-      "region": "auto",
-      "endpoint": "https://<ACCOUNT_ID>.r2.cloudflarestorage.com",
-      "accessKeyId": "YOUR_R2_ACCESS_KEY_ID",
-      "secretAccessKey": "YOUR_R2_SECRET_ACCESS_KEY",
-      "assetHost": "https://cdn.example.com",
-      "pathPrefix": "",
-      "forcePathStyle": true,
-      "serveMode": "direct"
-    }
-  }
-}
-```
-
-> Tip: If you want Ghost's local responsive image optimization (`/content/images/size/...`) without extra CDN image-resizing setup, you can keep `images` on Ghost's default local storage and only configure `storage.media` and `storage.files` to use `r2` (omit `storage.active` and `storage.images`).
+- **1:1 Native Ghost Directory Layout & Responsive Images**
+  - Supports separate `pathPrefix` per asset category (`content/images`, `content/media`, `content/files`) with automatic prefix deduplication (`resolveKey`), preventing doubled paths when Ghost reads/writes thumbnails or resized variants.
+  - Because bucket keys match Ghost's local disk structure and serve under your primary domain (`assetHost`), **Ghost's native responsive images (`/content/images/size/w.../format/webp/...`), WebP/AVIF conversion, and video upload thumbnails work out of the box**.
+  - Switching between local disk and R2 is a pure file sync—zero URL rewriting required.
+- **Built Specifically for Cloudflare R2 & AWS SDK v3**
+  - Uses modular `@aws-sdk/client-s3` v3 with only **2 runtime dependencies** (fast install, minimal memory footprint on small VPSes).
+  - Disables AWS SDK v3 default flexible checksum headers (`requestChecksumCalculation` / `responseChecksumValidation: 'WHEN_REQUIRED'`) that break uploads on Cloudflare R2.
+  - Intentionally omits legacy S3 `ACL` headers incompatible with R2.
+- **Production-Grade HTTP Streaming & Downloads (`direct` mode)**
+  - **Preserves `Content-Length` on Ghost 6 & iOS Safari**: Recovers accurate MIME types even for legacy `application/octet-stream` objects and sets RFC 9111 `Cache-Control: public, max-age=31536000, immutable, no-transform` on binary files—preventing Express `compression` (Brotli/gzip) from re-compressing ZIP/PDF/media downloads, burning CPU, or stripping `Content-Length` (which causes browsers to show `11 MB of ?`).
+  - **Native `HEAD` Support**: Serves `HEAD` via `HeadObjectCommand` without streaming object bodies from R2.
+  - **Full `Range` Support & Leak-Free Streaming**: Handles `206 Partial Content` and `416 Range Not Satisfiable` for audio/video seeking and download resumption, propagates `ETag` / `Last-Modified`, and destroys upstream R2 streams immediately on client disconnect.
+  - **Strict Boundary Handling**: Path traversal protection (`400`), accurate `404` / `ENOENT` mapping for Ghost's internal `read()` and `exists()`, and safe `delete()` across historical `YYYY/MM` paths.
 
 ---
 
-## Deployment in Docker / Portainer
+## Bucket Structure (Mirrors Ghost Local Disk)
 
-Because `index.js` is compiled directly from TypeScript (`tsc`) without bundling `@aws-sdk/client-s3`, runtime dependencies (`node_modules`) must be present alongside the adapter (or resolvable via `NODE_PATH`).
-
-### Recommended: Custom Image with `paths__installedAdaptersPath`
-
-Using Ghost's `paths__installedAdaptersPath` keeps your adapter outside `/var/lib/ghost/content` so it will never be shadowed or overwritten by Docker content volumes.
-
-1. Build the adapter locally or in CI:
-
-```bash
-npm ci
-npm run build
+```text
+<your-r2-bucket>/
+└── content/
+    ├── images/
+    │   ├── 2026/06/banner.jpg
+    │   └── size/
+    │       ├── w1200/2026/06/banner.jpg
+    │       └── w600/format/webp/2026/06/banner.jpg
+    ├── media/
+    │   └── 2026/06/demo.mp4          # video + generated thumbnail intact
+    └── files/
+        └── 2026/06/archive.zip       # full Content-Length + Range support
 ```
 
-2. `Dockerfile` example:
+---
 
-```dockerfile
-FROM ghost:6-alpine
-# Or ghost:5-alpine for Ghost 5.x
+## Quick Start (Docker Compose / Dockge / Portainer)
 
-WORKDIR /opt/ghost-adapters/storage/r2
-COPY package.json package-lock.json index.js ./
-RUN npm ci --omit=dev
+### 1. Environment Variables (3-Tier Isolation + Native Responsive Images)
 
-WORKDIR /var/lib/ghost
-ENV paths__installedAdaptersPath=/opt/ghost-adapters
-```
-
-3. Portainer Stack (`docker-compose.yml`) environment variables:
+Pair the shared `storage__s3__*` credentials with per-category `pathPrefix` and your primary domain as `assetHost`:
 
 ```yaml
 services:
   ghost:
-    image: your-registry/ghost-r2:latest
-    environment:
-      url: https://blog.example.com
-      # Optional: separate admin domain to bypass Cloudflare's 100MB upload cap (see below)
-      # admin__url: https://admin.example.com
-      paths__installedAdaptersPath: /opt/ghost-adapters
-      storage__active: r2
-      storage__media__adapter: r2
-      storage__files__adapter: r2
-      storage__r2__bucket: your-r2-bucket
-      storage__r2__region: auto
-      storage__r2__endpoint: https://<ACCOUNT_ID>.r2.cloudflarestorage.com
-      storage__r2__accessKeyId: YOUR_R2_ACCESS_KEY_ID
-      storage__r2__secretAccessKey: YOUR_R2_SECRET_ACCESS_KEY
-      storage__r2__assetHost: https://cdn.example.com
-      storage__r2__serveMode: direct
+    image: ghost:6-alpine
     volumes:
-      - ghost_content:/var/lib/ghost/content
+      - ghost-content:/var/lib/ghost/content
+    environment:
+      url: https://www.example.com
+
+      # Base R2 / S3 connection
+      storage__active: s3
+      storage__s3__endpoint: https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+      storage__s3__region: auto
+      storage__s3__bucket: your-r2-bucket
+      storage__s3__accessKeyId: ${R2_ACCESS_KEY_ID}
+      storage__s3__secretAccessKey: ${R2_SECRET_ACCESS_KEY}
+      storage__s3__forcePathStyle: "true"
+      storage__s3__assetHost: https://www.example.com
+
+      # 3-tier path mirroring (enables native responsive images & thumbnails)
+      storage__images__adapter: s3
+      storage__images__pathPrefix: content/images
+      storage__images__assetHost: https://www.example.com
+
+      storage__media__adapter: s3
+      storage__media__pathPrefix: content/media
+      storage__media__assetHost: https://www.example.com
+
+      storage__files__adapter: s3
+      storage__files__pathPrefix: content/files
+      storage__files__assetHost: https://www.example.com
 ```
 
-### Alternative: Bind Mount into `content/adapters/storage/r2`
+### 2. Install the Adapter into Ghost
 
-If you use the official `ghost` Docker image directly:
+Because pre-compiled `index.js` is kept in sync by CI, you do not need TypeScript on your server. Pick either deployment style:
 
-1. Prepare a directory on the host containing `index.js`, `package.json`, `package-lock.json`, and run `npm ci --omit=dev` inside it.
-2. Mount that directory into `/var/lib/ghost/content/adapters/storage/r2` in your Portainer stack and pass the same `storage__*` environment variables above.
+#### Option A: One-Shot Setup Service (Official `ghost:6-alpine`, Zero Custom Image)
+
+Add a `tools`-profile helper alongside your `ghost` service and run `docker compose --profile tools run --rm ghost-s3-setup` whenever installing or upgrading:
+
+```yaml
+  ghost-s3-setup:
+    image: node:22-alpine
+    profiles: ["tools"]
+    restart: "no"
+    volumes:
+      - ghost-content:/ghost-content
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        rm -rf /ghost-content/adapters/storage/s3
+        mkdir -p /ghost-content/adapters/storage/s3
+        cd /ghost-content/adapters/storage/s3
+        wget -qO- https://github.com/toutouer/ghost-storage-r2/archive/refs/heads/main.tar.gz | tar xz --strip-components=1
+        npm ci --omit=dev --ignore-scripts
+        chmod -R 755 /ghost-content/adapters
+        node -c /ghost-content/adapters/storage/s3/index.js
+```
+
+#### Option B: Custom Image via `paths__installedAdaptersPath`
+
+Keeps the adapter baked into the image outside `/var/lib/ghost/content`:
+
+```dockerfile
+FROM ghost:6-alpine
+WORKDIR /opt/ghost-adapters/storage/s3
+COPY package.json package-lock.json index.js ./
+RUN npm ci --omit=dev --ignore-scripts
+WORKDIR /var/lib/ghost
+ENV paths__installedAdaptersPath=/opt/ghost-adapters
+```
 
 ---
 
-## Note on Cloudflare's 100 MB Upload Limit
+## Configuration Options
 
-Cloudflare Free/Pro proxy enforces a **100 MB** max HTTP request body (`413 Payload Too Large`) before requests reach Ghost or this storage adapter.
+| Option | Required | Default | Description |
+| :--- | :---: | :--- | :--- |
+| `bucket` | Yes | — | R2 / S3 bucket name. |
+| `endpoint` | No | — | R2 S3 endpoint (`https://<ACCOUNT_ID>.r2.cloudflarestorage.com`). |
+| `region` | No | `'auto'` | Region slug (`'auto'` for Cloudflare R2). |
+| `accessKeyId` | No | AWS chain | R2 / S3 Access Key ID. |
+| `secretAccessKey` | No | AWS chain | R2 / S3 Secret Access Key. |
+| `forcePathStyle` | No | `Boolean(endpoint)` | Use path-style URLs (`true` when `endpoint` is set). |
+| `assetHost` | No | S3 URL | Public domain prefix (set to your primary Ghost URL for responsive images). |
+| `pathPrefix` | No | `''` | Key prefix inside the bucket (e.g., `content/images`, `content/media`, `content/files`). |
+| `serveMode` | No | `'direct'` | `'direct'` (stream via Ghost with `HEAD`/`Range`/`no-transform`) or `'redirect'` (`301` to `assetHost`). |
 
-To upload files larger than 100 MB through Ghost Admin without switching `hosts` manually:
-
-- Configure Ghost's built-in admin URL separation (`admin__url: https://admin.example.com`), and route that admin subdomain directly to your origin (e.g. via Tailscale/WireGuard private network or a DNS-only grey-cloud record protected by IP allowlisting—note that Cloudflare Tunnel also enforces the 100 MB proxy cap).
+> **Cloudflare 100 MB Upload Cap**: Cloudflare Free/Pro proxy caps HTTP upload bodies at 100 MB (`413 Payload Too Large`) before traffic reaches Ghost. For uploads > 100 MB through Ghost Admin, configure a separate `admin__url` routed directly to your origin (DNS-only + IP allowlist or private VPN).
 
 ---
 
@@ -148,11 +150,14 @@ To upload files larger than 100 MB through Ghost Admin without switching `hosts`
 
 ```bash
 npm ci
-npm run check   # prettier check + typecheck + tsc build + node --test
+npm run check   # prettier check + tsc typecheck + tsc build + node --test
 ```
 
-GitHub Actions (`.github/workflows/ci.yml`) automatically runs formatting, TypeScript typecheck, build, and `node --test` unit tests on **Node 20 & 22** for every push and PR. If `src/index.ts` is edited directly on `main` (e.g., via GitHub Web UI), CI automatically rebuilds and commits `index.js` once all checks pass. Dependabot (`.github/dependabot.yml`) checks npm and GitHub Actions updates monthly.
+- **CI (`.github/workflows/ci.yml`)**: Runs formatting, TypeScript typecheck, build, and zero-dependency `node --test` unit tests on **Node 20 & 22** on every push and PR. On direct pushes to `main` (e.g., edits via GitHub Web UI), CI automatically rebuilds and commits `index.js` once all checks pass.
+- **Dependabot (`.github/dependabot.yml`)**: Checks npm and GitHub Actions updates monthly and validates every PR against CI.
 
-## License
+---
 
-[ISC](./LICENSE.md) — Originally based on [ghos3](https://github.com/laosb/ghos3) by Shibo Lyu and [ghost-storage-adapter-s3](https://github.com/colinmeinke/ghost-storage-adapter-s3) by Colin Meinke.
+## License & Attribution
+
+[ISC](./LICENSE.md) — Originally evolved from [laosb/ghos3](https://github.com/laosb/ghos3) and [colinmeinke/ghost-storage-adapter-s3](https://github.com/colinmeinke/ghost-storage-adapter-s3), now independently maintained and modernized for Cloudflare R2 and Ghost 6.x.
