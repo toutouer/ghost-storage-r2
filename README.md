@@ -20,11 +20,6 @@ Most Ghost S3 adapters either flatten paths into a single directory, break Ghost
   - Uses modular `@aws-sdk/client-s3` v3 with only **2 runtime dependencies** (fast install, minimal memory footprint on small VPSes).
   - Disables AWS SDK v3 default flexible checksum headers (`requestChecksumCalculation` / `responseChecksumValidation: 'WHEN_REQUIRED'`) that break uploads on Cloudflare R2.
   - Intentionally omits legacy S3 `ACL` headers incompatible with R2.
-- **Production-Grade HTTP Streaming & Downloads (`direct` mode)**
-  - **Preserves `Content-Length` on Ghost 6 & iOS Safari**: Recovers accurate MIME types even for legacy `application/octet-stream` objects and sets RFC 9111 `Cache-Control: public, max-age=31536000, immutable, no-transform` on binary files—preventing Express `compression` (Brotli/gzip) from re-compressing ZIP/PDF/media downloads, burning CPU, or stripping `Content-Length` (which causes browsers to show `11 MB of ?`).
-  - **Native `HEAD` Support**: Serves `HEAD` via `HeadObjectCommand` without streaming object bodies from R2.
-  - **Full `Range` Support & Leak-Free Streaming**: Handles `206 Partial Content` and `416 Range Not Satisfiable` for audio/video seeking and download resumption, propagates `ETag` / `Last-Modified`, and destroys upstream R2 streams immediately on client disconnect.
-  - **Strict Boundary Handling**: Path traversal protection (`400`), accurate `404` / `ENOENT` mapping for Ghost's internal `read()` and `exists()`, and safe `delete()` across historical `YYYY/MM` paths.
 
 ---
 
