@@ -28,7 +28,7 @@
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/ghost-storage-base": "^0.0.4",
-    "@types/node": "^22.0.0",
+    "@types/node": "^26.6.6",
     "prettier": "^3.4.2",
     "typescript": "^5.7.2"
   }
