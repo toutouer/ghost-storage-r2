@@ -1,5 +1,7 @@
 # ghost-storage-r2
 
+[![CI](https://github.com/toutouer/ghost-storage-r2/actions/workflows/ci.yml/badge.svg)](https://github.com/toutouer/ghost-storage-r2/actions/workflows/ci.yml)
+
 Cloudflare R2 & S3-compatible storage adapter for **Ghost 5.x & 6.x** (Node.js >= 20).
 
 This project originally evolved from [laosb/ghos3](https://github.com/laosb/ghos3) (which modernized [colinmeinke/ghost-storage-adapter-s3](https://github.com/colinmeinke/ghost-storage-adapter-s3)) and is now maintained as an independent repository tailored for Cloudflare R2 and Docker / Portainer deployments.
@@ -142,13 +144,14 @@ To upload files larger than 100 MB through Ghost Admin without switching `hosts`
 
 ---
 
-## Development
+## Development & CI
 
 ```bash
-npm install
-npm run typecheck
-npm run build
+npm ci
+npm run check   # prettier check + typecheck + tsc build + node --test
 ```
+
+GitHub Actions (`.github/workflows/ci.yml`) automatically runs formatting, TypeScript typecheck, build, and `node --test` unit tests on **Node 20 & 22** for every push and PR. If `src/index.ts` is edited directly on `main` (e.g., via GitHub Web UI), CI automatically rebuilds and commits `index.js` once all checks pass. Dependabot (`.github/dependabot.yml`) checks npm and GitHub Actions updates monthly.
 
 ## License
 
