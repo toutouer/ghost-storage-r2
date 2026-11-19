@@ -1,6 +1,6 @@
 {
   "name": "ghost-storage-r2",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Cloudflare R2 / S3 storage adapter for Ghost 5.x & 6.x.",
   "main": "index.js",
   "repository": {

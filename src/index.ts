@@ -43,9 +43,33 @@ const MIME_MAP: Record<string, string> = {
   '.m4a': 'audio/mp4',
   '.pdf': 'application/pdf',
   '.zip': 'application/zip',
+  '.rar': 'application/vnd.rar',
+  '.7z': 'application/x-7z-compressed',
+  '.tar': 'application/x-tar',
+  '.gz': 'application/gzip',
+  '.epub': 'application/epub+zip',
+  '.doc': 'application/msword',
+  '.docx':
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  '.pptx':
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   '.json': 'application/json',
   '.webmanifest': 'application/manifest+json',
+  '.txt': 'text/plain; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8',
+  '.csv': 'text/csv; charset=utf-8',
 }
+
+const COMPRESSIBLE_CONTENT_TYPES = new Set([
+  'image/svg+xml',
+  'application/json',
+  'application/manifest+json',
+])
+
+const BASE_CACHE_CONTROL = 'public, max-age=31536000, immutable'
 
 class InvalidPathError extends Error {
   statusCode = 400
@@ -58,13 +82,63 @@ class InvalidPathError extends Error {
 }
 
 function getContentType(filePath?: string, explicitType?: string): string {
-  if (explicitType && explicitType !== 'application/octet-stream') {
+  const normalizedExplicit = explicitType?.split(';')[0].trim().toLowerCase()
+  if (
+    explicitType &&
+    normalizedExplicit &&
+    normalizedExplicit !== 'application/octet-stream' &&
+    normalizedExplicit !== 'binary/octet-stream'
+  ) {
     return explicitType
   }
   if (filePath && filePath.includes('/format/webp/')) return 'image/webp'
   if (filePath && filePath.includes('/format/avif/')) return 'image/avif'
   const ext = extname((filePath || '').split(/[?#]/)[0]).toLowerCase()
   return MIME_MAP[ext] || explicitType || 'application/octet-stream'
+}
+
+function isTextLikeContentType(contentType: string): boolean {
+  const mime = contentType.split(';')[0].trim().toLowerCase()
+  return mime.startsWith('text/') || COMPRESSIBLE_CONTENT_TYPES.has(mime)
+}
+
+function getCacheControl(contentType: string): string {
+  // RFC 9111: mark non-text/binary payloads `no-transform` so downstream
+  // compression middleware (e.g. Ghost Express compression) and proxies
+  // never re-compress binaries or strip Content-Length.
+  return isTextLikeContentType(contentType)
+    ? BASE_CACHE_CONTROL
+    : `${BASE_CACHE_CONTROL}, no-transform`
+}
+
+type ObjectMetadata = {
+  ContentType?: string
+  AcceptRanges?: string
+  ContentLength?: number
+  ContentRange?: string
+  ETag?: string
+  LastModified?: Date
+}
+
+function buildObjectHeaders(
+  key: string,
+  meta: ObjectMetadata
+): Record<string, string> {
+  const contentType = getContentType(key, meta.ContentType)
+  const headers: Record<string, string> = {
+    'Cache-Control': getCacheControl(contentType),
+    'Content-Type': contentType,
+    'Accept-Ranges': meta.AcceptRanges || 'bytes',
+  }
+  if (meta.ContentLength !== undefined) {
+    headers['Content-Length'] = String(meta.ContentLength)
+  }
+  if (meta.ContentRange) headers['Content-Range'] = meta.ContentRange
+  if (meta.ETag) headers['ETag'] = meta.ETag
+  if (meta.LastModified instanceof Date) {
+    headers['Last-Modified'] = meta.LastModified.toUTCString()
+  }
+  return headers
 }
 
 const stripLeadingAndTrailingSlashes = (str: string) =>
@@ -86,6 +160,15 @@ function isNotFoundError(err: any): boolean {
     err.name === 'NotFound' ||
     err.Code === 'NoSuchKey' ||
     (err.$metadata && err.$metadata.httpStatusCode === 404)
+  )
+}
+
+function isRangeNotSatisfiableError(err: any): boolean {
+  if (!err) return false
+  return Boolean(
+    err.name === 'InvalidRange' ||
+    err.Code === 'InvalidRange' ||
+    (err.$metadata && err.$metadata.httpStatusCode === 416)
   )
 }
 
@@ -194,6 +277,7 @@ class S3Storage extends BaseAdapter {
     const targetRelative = await this.getUniqueFileName(image, dir)
     const key = this.resolveKey(targetRelative)
     const { size } = await stat(image.path)
+    const contentType = getContentType(image.name || image.path, image.type)
     const file = createReadStream(image.path)
     try {
       await this.client.send(
@@ -202,8 +286,8 @@ class S3Storage extends BaseAdapter {
           Key: key,
           Body: file,
           ContentLength: size,
-          ContentType: getContentType(image.name || image.path, image.type),
-          CacheControl: 'public, max-age=31536000, immutable',
+          ContentType: contentType,
+          CacheControl: getCacheControl(contentType),
         })
       )
     } finally {
@@ -214,14 +298,15 @@ class S3Storage extends BaseAdapter {
 
   async saveRaw(buffer: Buffer, targetPath: string): Promise<string> {
     const key = this.resolveKey(targetPath)
+    const contentType = getContentType(targetPath)
     await this.client.send(
       new PutObjectCommand({
         Bucket: this.bucket,
         Key: key,
         Body: buffer,
         ContentLength: buffer.length,
-        ContentType: getContentType(targetPath),
-        CacheControl: 'public, max-age=31536000, immutable',
+        ContentType: contentType,
+        CacheControl: getCacheControl(contentType),
       })
     )
     return `${this.host}/${key}`
@@ -235,6 +320,18 @@ class S3Storage extends BaseAdapter {
           res.redirect(301, encodeURI(`${this.host}/${key}`))
           return
         }
+
+        if (req.method === 'HEAD') {
+          const head = await this.client.send(
+            new HeadObjectCommand({
+              Bucket: this.bucket,
+              Key: key,
+            })
+          )
+          res.status(200).set(buildObjectHeaders(key, head)).end()
+          return
+        }
+
         const params: GetObjectCommandInput = {
           Bucket: this.bucket,
           Key: key,
@@ -249,18 +346,9 @@ class S3Storage extends BaseAdapter {
           return
         }
 
-        const headers: Record<string, string> = {
-          'Cache-Control': 'public, max-age=31536000, immutable',
-          'Content-Type': out.ContentType || getContentType(key),
-          'Accept-Ranges': out.AcceptRanges || 'bytes',
-        }
-        if (out.ContentLength !== undefined) {
-          headers['Content-Length'] = String(out.ContentLength)
-        }
-        if (out.ContentRange) headers['Content-Range'] = out.ContentRange
-        if (out.ETag) headers['ETag'] = out.ETag
-
-        res.status(out.ContentRange ? 206 : 200).set(headers)
+        res
+          .status(out.ContentRange ? 206 : 200)
+          .set(buildObjectHeaders(key, out))
 
         stream.on('error', (streamErr) => {
           if (!res.headersSent) {
@@ -286,6 +374,10 @@ class S3Storage extends BaseAdapter {
         }
         if (isNotFoundError(e)) {
           res.status(404).end()
+          return
+        }
+        if (isRangeNotSatisfiableError(e)) {
+          res.status(416).end()
           return
         }
         next(e)

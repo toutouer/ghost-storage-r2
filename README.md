@@ -8,9 +8,9 @@ This project originally evolved from [laosb/ghos3](https://github.com/laosb/ghos
 
 - Built on AWS SDK v3 (`@aws-sdk/client-s3`) with Cloudflare R2 flexible checksum compatibility (`requestChecksumCalculation` / `responseChecksumValidation: 'WHEN_REQUIRED'`).
 - Two serving modes via `serveMode`:
-  - `direct` (default): Streams objects through Ghost with HTTP `Range` (`206 Partial Content`) support for audio/video seeking and clean stream teardown on client disconnect.
+  - `direct` (default): Streams objects through Ghost with native `HEAD` (`HeadObjectCommand`), HTTP `Range` (`206 Partial Content` / `416 Range Not Satisfiable`) support for audio/video seeking and download resumption, and clean stream teardown on client disconnect.
   - `redirect`: Returns `301` redirects directly to `${assetHost}/${key}`.
-- Automatic `Content-Length` detection, MIME mapping (including WebP/AVIF responsive paths), `Cache-Control: public, max-age=31536000, immutable`, and path traversal protection.
+- Accurate `Content-Type` inference (recovering proper MIME types even for legacy `application/octet-stream` objects), RFC 9111 `no-transform` on binary assets (preserving `Content-Length` and preventing Express/proxy re-compression), `Last-Modified` / `ETag` propagation, and path traversal protection.
 - Proper `ENOENT` / `404` handling for Ghost internal `read()` and `exists()` checks, plus safe `delete()` handling for historical `YYYY/MM` paths.
 
 ---
